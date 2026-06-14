@@ -512,7 +512,8 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
             forecasts["LINDA"] = R_linda
         if R_anvil is not None:
             forecasts["ANVIL"] = R_anvil
-        base.notify_precip_alerts(forecasts, info, last_ts, timestep=TIMESTEP)
+        base.notify_precip_alerts(forecasts, info, last_ts, timestep=TIMESTEP,
+                                  obs_field=frames[-1]["data"])
     except Exception as exc:
         log.warning("Powiadomienia Telegram pominięte: %s", exc)
 

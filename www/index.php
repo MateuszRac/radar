@@ -33,7 +33,8 @@ if (isset($_GET['api'])) {
 
     // ── Fallback: skanowanie katalogu (gdy brak manifestu) ───────────────────
     $obs  = [];
-    $fcst = ['det' => [], 'icon' => [], 'mean' => [], 'prob01' => [], 'prob10' => []];
+    $fcst = ['det' => [], 'linda' => [], 'anvil' => [], 'icon' => [], 'lindaicon' => [],
+             'anvilicon' => [], 'mean' => [], 'prob01' => [], 'prob10' => []];
 
     foreach (glob($dir . '*.png') as $f) {
         $name = basename($f, '.png');
@@ -46,7 +47,7 @@ if (isset($_GET['api'])) {
                 'sort'  => $name,
             ];
         } elseif (preg_match(
-            '/^fcst_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})_plus_(\d+)_(mean|det|icon|prob01|prob10)$/',
+            '/^fcst_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})_plus_(\d+)_(mean|det|linda|anvil|icon|lindaicon|anvilicon|prob01|prob10)$/',
             $name, $m
         )) {
             $lead     = (int)$m[6];
@@ -83,7 +84,7 @@ if (isset($_GET['api'])) {
     exit;
 }
 
-$v = '8';   // cache-busting statycznych zasobów
+$v = '9';   // cache-busting statycznych zasobów
 ?>
 <!DOCTYPE html>
 <html lang="pl">

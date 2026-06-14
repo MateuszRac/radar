@@ -88,22 +88,23 @@ def clean_radar_images(data_dir: Path = WWW_DATA_DIR) -> int:
     return removed
 
 
-def generate_images(icon: bool, linda: bool = True) -> None:
+def generate_images(icon: bool, linda: bool = True, anvil: bool = False) -> None:
     """
     Uruchamia generator overlayów do www/data.
 
-    icon=False → steps_nowcast_imgw.py        (S-PROG [+ LINDA])
-    icon=True  → steps_nowcast_imgw_icon.py   (S-PROG [+ LINDA] + warianty ICON)
+    icon=False → steps_nowcast_imgw.py        (S-PROG [+ LINDA] [+ ANVIL])
+    icon=True  → steps_nowcast_imgw_icon.py   (S-PROG [+ LINDA] [+ ANVIL] + warianty ICON)
     linda      → czy dołączyć prognozy LINDA / LINDA+ICON.
+    anvil      → czy dołączyć prognozy ANVIL / ANVIL+ICON.
     """
-    metody = "S-PROG" + (" + LINDA" if linda else "")
+    metody = "S-PROG" + (" + LINDA" if linda else "") + (" + ANVIL" if anvil else "")
     if icon:
         log.info("Generowanie typów: %s oraz warianty z ICON-EU...", metody)
         module = _load_module(NOWCAST_ICON, "steps_nowcast_imgw_icon")
     else:
         log.info("Generowanie typów: %s (bez ICON)...", metody)
         module = _load_module(NOWCAST_BASE, "steps_nowcast_imgw")
-    module.main(ensemble=False, linda=linda)
+    module.main(ensemble=False, linda=linda, anvil=anvil)
     log.info("Generowanie zakończone.")
 
 
@@ -134,15 +135,17 @@ def upload_images(
 def run_pipeline(
     icon: bool = False,
     linda: bool = True,
+    anvil: bool = False,
     do_upload: bool = True,
     remote_dir: str | None = None,
 ) -> None:
     """Wykonuje pełny pipeline: czyszczenie → generowanie → transfer."""
-    log.info("=== START pipeline STEPS%s%s ===",
-             "  +LINDA" if linda else "", "  +ICON" if icon else "")
+    log.info("=== START pipeline STEPS%s%s%s ===",
+             "  +LINDA" if linda else "", "  +ANVIL" if anvil else "",
+             "  +ICON" if icon else "")
 
     clean_radar_images()
-    generate_images(icon=icon, linda=linda)
+    generate_images(icon=icon, linda=linda, anvil=anvil)
 
     if do_upload:
         upload_images(remote_dir=remote_dir)
@@ -168,6 +171,9 @@ def main() -> None:
     grp.add_argument("--no-linda", dest="linda", action="store_false",
                      help="Pomiń LINDA (szybciej, tylko S-PROG).")
     parser.set_defaults(linda=True)
+    parser.add_argument("--anvil", dest="anvil", action="store_true",
+                        help="Generuj też prognozy ANVIL (AR-2; domyślnie wyłączone).")
+    parser.set_defaults(anvil=False)
     parser.add_argument(
         "--no-upload", dest="upload", action="store_false",
         help="Nie wysyłaj plików przez FTP (tylko czyszczenie + generowanie).",
@@ -180,7 +186,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    run_pipeline(icon=args.icon, linda=args.linda,
+    run_pipeline(icon=args.icon, linda=args.linda, anvil=args.anvil,
                  do_upload=args.upload, remote_dir=args.remote_dir)
 
 

@@ -23,8 +23,10 @@ export const LS_STYLE   = 'steps_map_style';
 export const FORECAST_TYPES = [
   { key: 'det',       label: 'S-PROG',           short: 'S-PROG' },
   { key: 'linda',     label: 'LINDA',            short: 'LINDA' },
+  { key: 'anvil',     label: 'ANVIL',            short: 'ANVIL' },
   { key: 'icon',      label: 'S-PROG + ICON-EU', short: 'S-PROG+ICON' },
   { key: 'lindaicon', label: 'LINDA + ICON-EU',  short: 'LINDA+ICON' },
+  { key: 'anvilicon', label: 'ANVIL + ICON-EU',  short: 'ANVIL+ICON' },
 ];
 
 // ── Produkty (opisy do panelu „O produkcie”) ──────────────────────────────────
@@ -46,6 +48,12 @@ export const PRODUCTS = [
         + 'autoregresyjnym; lepiej zachowuje lokalne maksima konwekcyjne niż S-PROG.',
   },
   {
+    key: 'anvil', label: 'ANVIL', short: 'ANVIL', unit: 'mm/h',
+    desc: 'ANVIL (Autoregressive Nowcasting using VIL) — deterministyczna prognoza '
+        + 'z modelem autoregresyjnym AR(2) w przestrzennie zdekomponowanym polu; '
+        + 'oddaje rozwój i zanik komórek opadu lepiej niż czysta ekstrapolacja.',
+  },
+  {
     key: 'icon', label: 'S-PROG + ICON-EU', short: 'S-PROG+ICON', unit: 'mm/h',
     desc: 'S-PROG zmieszany liniowo z modelem ICON-EU (DWD): radar dominuje na '
         + 'krótkich horyzontach, model numeryczny na dłuższych (0%→100% w horyzoncie).',
@@ -53,6 +61,11 @@ export const PRODUCTS = [
   {
     key: 'lindaicon', label: 'LINDA + ICON-EU', short: 'LINDA+ICON', unit: 'mm/h',
     desc: 'LINDA zmieszana liniowo z modelem ICON-EU (DWD): nowcasting cech opadu '
+        + 'na krótkich horyzontach, tło mezoskalowe NWP na dłuższych.',
+  },
+  {
+    key: 'anvilicon', label: 'ANVIL + ICON-EU', short: 'ANVIL+ICON', unit: 'mm/h',
+    desc: 'ANVIL zmieszany liniowo z modelem ICON-EU (DWD): autoregresyjny nowcasting '
         + 'na krótkich horyzontach, tło mezoskalowe NWP na dłuższych.',
   },
   {
@@ -139,8 +152,10 @@ export const PALETTES = {
   mean:      RATE_PAL,
   det:       RATE_PAL,
   linda:     RATE_PAL,
+  anvil:     RATE_PAL,
   icon:      RATE_PAL,
   lindaicon: RATE_PAL,
+  anvilicon: RATE_PAL,
   prob01: { title: 'P(R > 0.1 mm/h)', unit: '%', entries: PROB01_ENTRIES },
   prob10: { title: 'P(R > 10 mm/h)', unit: '%', entries: PROB10_ENTRIES },
 };

@@ -117,7 +117,7 @@ $manifest_file = $dir . 'manifest.json';
 $man = is_file($manifest_file) ? json_decode(file_get_contents($manifest_file), true) : null;
 
 // Deterministyczne produkty opadu [mm/h] pokazywane w meteogramie.
-$RAIN_PRODUCTS = ['det', 'linda', 'icon', 'lindaicon'];
+$RAIN_PRODUCTS = ['det', 'linda', 'anvil', 'icon', 'lindaicon', 'anvilicon'];
 
 if (is_array($man) && isset($man['obs'])) {
     // ── Ścieżka główna: lista plików z manifestu (spójna w trakcie sync) ─────
@@ -160,7 +160,7 @@ if (is_array($man) && isset($man['obs'])) {
         }
 
         if (!preg_match(
-            '/^fcst_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})_plus_(\d+)_(det|linda|icon|lindaicon)$/',
+            '/^fcst_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})_plus_(\d+)_(det|linda|anvil|icon|lindaicon|anvilicon)$/',
             $name, $m
         )) continue;
 

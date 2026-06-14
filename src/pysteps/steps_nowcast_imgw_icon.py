@@ -34,7 +34,7 @@ import os
 import re
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import eccodes
@@ -102,7 +102,7 @@ def find_icon_eu_run(nwp: NWP, t_now: datetime) -> tuple[datetime, str, list[int
     całkogodzinne potrzebne do de-akumulacji (różnice sąsiednich kroków
     dają natężenia godzinowe).
     """
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC (porównania z t_now)
 
     for delta_h in range(0, 28, 3):
         base_dt = now_utc - timedelta(hours=delta_h)
@@ -325,17 +325,22 @@ def blend_radar_nwp(radar: np.ndarray, icon_stack: np.ndarray) -> np.ndarray:
     return np.maximum(wr * radar + wn * icon_stack, 0.0)
 
 
-def build_forecast_meta(run_dt: datetime, last_ts: datetime, with_linda: bool = True) -> dict:
+def build_forecast_meta(run_dt: datetime, last_ts: datetime,
+                        with_linda: bool = True, with_anvil: bool = False) -> dict:
     """
     Buduje słownik meta dla manifestu — lista dostępnych typów prognozy
-    (S-PROG / LINDA, każdy także w wariancie z ICON-EU) + czas runu ICON-EU.
+    (S-PROG / LINDA / ANVIL, każdy także w wariancie z ICON-EU) + czas runu ICON-EU.
     """
     types = [{"key": "det", "label": "S-PROG", "short": "S-PROG"}]
     if with_linda:
         types.append({"key": "linda", "label": "LINDA", "short": "LINDA"})
+    if with_anvil:
+        types.append({"key": "anvil", "label": "ANVIL", "short": "ANVIL"})
     types.append({"key": "icon", "label": "S-PROG + ICON-EU", "short": "S-PROG+ICON"})
     if with_linda:
         types.append({"key": "lindaicon", "label": "LINDA + ICON-EU", "short": "LINDA+ICON"})
+    if with_anvil:
+        types.append({"key": "anvilicon", "label": "ANVIL + ICON-EU", "short": "ANVIL+ICON"})
     return {
         "types":      types,
         "default":    "det",
@@ -346,10 +351,11 @@ def build_forecast_meta(run_dt: datetime, last_ts: datetime, with_linda: bool = 
 
 # ── Główna logika ─────────────────────────────────────────────────────────────
 
-def main(ensemble: bool = False, linda: bool = True) -> None:
+def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> None:
     """
-    Pipeline S-PROG (+ opcjonalnie LINDA / ensemble STEPS) zmiksowany z ICON-EU.
+    Pipeline S-PROG (+ opcjonalnie LINDA / ANVIL / ensemble STEPS) zmiksowany z ICON-EU.
     Gdy ``linda=True`` (domyślnie) generuje też typy ``linda`` i ``lindaicon``.
+    Gdy ``anvil=True`` generuje też typy ``anvil`` i ``anvilicon``.
     Wyjście identyczne jak w skrypcie bazowym + plik meta.json (typ „+ICON”).
     """
     client = ImgwClient()
@@ -391,6 +397,9 @@ def main(ensemble: bool = False, linda: bool = True) -> None:
     # 4b. LINDA deterministyczna (opcjonalnie) ────────────────────────────────
     R_linda = base.compute_linda(R_obs, V, kmperpixel) if linda else None
 
+    # 4c. ANVIL deterministyczna (opcjonalnie) ────────────────────────────────
+    R_anvil = base.compute_anvil(R_obs, V) if anvil else None
+
     # 5. ICON-EU → stos natężeń na siatce radaru ──────────────────────────────
     t_now = timestamps[-1]
     icon_stack, run_dt = fetch_icon_stack(nwp, t_now, info)
@@ -403,6 +412,7 @@ def main(ensemble: bool = False, linda: bool = True) -> None:
     # to `icon` (S-PROG+ICON) oraz `lindaicon` (LINDA+ICON).
     R_det_blend   = blend_radar_nwp(R_det, icon_stack)
     R_linda_blend = blend_radar_nwp(R_linda, icon_stack) if R_linda is not None else None
+    R_anvil_blend = blend_radar_nwp(R_anvil, icon_stack) if R_anvil is not None else None
 
     # Diagnostyka ostatniego kroku (lead = HORIZON_MIN, waga NWP = 100%):
     # icon_stack[-1] to czysto ICON. Jeśli ≈ 0, opad w ostatniej klatce zniknie.
@@ -442,27 +452,35 @@ def main(ensemble: bool = False, linda: bool = True) -> None:
 
     log.info("Prognoza gotowa. Przygotowywanie overlayów...")
 
-    # 8. Overlaye Leaflet (reużyte) — typy: det, linda, icon, lindaicon ───────
+    # 8. Overlaye Leaflet (reużyte) — typy: det, linda, anvil, icon, lindaicon, anvilicon
     last_ts = timestamps[-1]
     extra = []
     if R_linda is not None:
         extra.append(("linda", R_linda))
+    if R_anvil is not None:
+        extra.append(("anvil", R_anvil))
     extra.append(("icon", R_det_blend))
     if R_linda_blend is not None:
         extra.append(("lindaicon", R_linda_blend))
+    if R_anvil_blend is not None:
+        extra.append(("anvilicon", R_anvil_blend))
 
     base.generate_leaflet_overlays(
         frames, R_mean, R_det, P_all, info, last_ts,
         extra_dets=extra,
-        meta=build_forecast_meta(run_dt, last_ts, with_linda=R_linda is not None),
+        meta=build_forecast_meta(run_dt, last_ts,
+                                 with_linda=R_linda is not None,
+                                 with_anvil=R_anvil is not None),
     )
 
     # Alerty Telegram o silnym opadzie — sprawdzamy czyste prognozy radarowe
-    # (STEPS / LINDA), bez wariantów ICON (te tłumią opad na krótkich horyzontach).
+    # (STEPS / LINDA / ANVIL), bez wariantów ICON (te tłumią opad na krótkich horyzontach).
     try:
         forecasts = {"STEPS": R_det}
         if R_linda is not None:
             forecasts["LINDA"] = R_linda
+        if R_anvil is not None:
+            forecasts["ANVIL"] = R_anvil
         base.notify_precip_alerts(forecasts, info, last_ts, timestep=TIMESTEP)
     except Exception as exc:
         log.warning("Powiadomienia Telegram pominięte: %s", exc)
@@ -485,6 +503,9 @@ if __name__ == "__main__":
     grp.add_argument("--no-linda", dest="linda", action="store_false",
                      help="Pomiń LINDA (tylko S-PROG i S-PROG+ICON).")
     parser.set_defaults(linda=True)
+    parser.add_argument("--anvil", dest="anvil", action="store_true",
+                        help="Generuj też ANVIL i ANVIL+ICON (domyślnie wyłączone).")
+    parser.set_defaults(anvil=False)
     args = parser.parse_args()
 
-    main(ensemble=args.ensemble, linda=args.linda)
+    main(ensemble=args.ensemble, linda=args.linda, anvil=args.anvil)

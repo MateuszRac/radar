@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import h5py
@@ -29,8 +29,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import geopandas as gpd
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.figure import Figure
 from PIL import Image
 from pyproj import CRS, Proj, Transformer
 
@@ -151,38 +149,76 @@ def compute_epsg3857_mesh(info: dict) -> tuple[np.ndarray, np.ndarray, dict]:
     return X_3857, Y_3857, bounds
 
 
-def render_overlay_png(
-    data: np.ndarray,
+def build_warp_index(
+    info: dict,
     X_3857: np.ndarray,
     Y_3857: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """
+    Buduje (RAZ na przebieg) mapę indeksów nearest-neighbor reprojekcji
+    natywna siatka radaru → regularny raster EPSG:3857.
+
+    Dla każdego piksela wyjściowego (regularny w 3857, góra = północ) wyznacza,
+    z której komórki natywnej siatki pobrać wartość. Dzięki temu kosztowna
+    reprojekcja liczona jest tylko raz, a render każdej klatki to czyste
+    indeksowanie numpy (bez matplotlib / pcolormesh — to było wąskie gardło,
+    zwłaszcza na słabszym CPU jak Raspberry Pi).
+
+    Zwraca (flat_idx, valid, W, H):
+      flat_idx – (H, W) int: indeks do ``data.ravel()`` (poza domeną = 0)
+      valid    – (H, W) bool: czy piksel mieści się w domenie radaru
+      W, H     – wymiary wyjściowego rastra (H = ysize, czyli natywna rozdzielczość)
+    """
+    x1, x2, y1, y2 = info["x1"], info["x2"], info["y1"], info["y2"]
+    xsize, ysize = info["xsize"], info["ysize"]
+
+    x_min, x_max = float(X_3857.min()), float(X_3857.max())
+    y_min, y_max = float(Y_3857.min()), float(Y_3857.max())
+
+    H = ysize
+    W = int(round(H * (x_max - x_min) / (y_max - y_min)))
+
+    to_native = Transformer.from_proj(Proj("EPSG:3857"), Proj(info["projdef"]), always_xy=True)
+    xo = np.linspace(x_min, x_max, W)
+    yo = np.linspace(y_max, y_min, H)      # góra rastra = północ
+    Xo, Yo = np.meshgrid(xo, yo)
+    Xn, Yn = to_native.transform(Xo, Yo)
+
+    # Współrzędne natywne → indeks komórki (oś X: W→E, oś Y: S→N — jak `data`).
+    j = np.floor((Xn - x1) / (x2 - x1) * xsize).astype(np.intp)
+    i = np.floor((Yn - y1) / (y2 - y1) * ysize).astype(np.intp)
+    valid = (j >= 0) & (j < xsize) & (i >= 0) & (i < ysize)
+    np.clip(i, 0, ysize - 1, out=i)
+    np.clip(j, 0, xsize - 1, out=j)
+
+    flat_idx = i * xsize + j
+    flat_idx[~valid] = 0
+    return flat_idx, valid, W, H
+
+
+def render_overlay_png(
+    data: np.ndarray,
+    flat_idx: np.ndarray,
+    valid: np.ndarray,
     output_path: Path,
     cmap,
     norm,
 ) -> None:
     """
-    Renderuje transparentny PNG w projekcji EPSG:3857 gotowy do L.imageOverlay.
-    Wartości NaN i < progu (set_under) → alpha = 0 (przezroczyste).
+    Renderuje transparentny PNG w EPSG:3857 gotowy do L.imageOverlay, używając
+    gotowej mapy indeksów z :func:`build_warp_index` (bez matplotlib figure).
+
+    Wartości NaN i < progu (set_under) → alpha = 0 (przezroczyste), identycznie
+    jak przy dawnym pcolormesh — ``ScalarMappable.to_rgba`` respektuje
+    set_under / set_bad palety.
     """
-    x_min, x_max = float(X_3857.min()), float(X_3857.max())
-    y_min, y_max = float(Y_3857.min()), float(Y_3857.max())
-    aspect = (x_max - x_min) / (y_max - y_min)
-
-    fig = Figure(figsize=(8 * aspect, 8), dpi=130, frameon=False)
-    canvas = FigureCanvasAgg(fig)
-    ax = fig.add_axes([0, 0, 1, 1])
-    fig.patch.set_alpha(0)
-    ax.patch.set_alpha(0)
-
-    ax.pcolormesh(X_3857, Y_3857, data, cmap=cmap, norm=norm, shading="flat")
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_aspect("auto")
-    ax.axis("off")
-
-    canvas.draw()
-    w, h = canvas.get_width_height()
-    buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
-    Image.fromarray(buf, "RGBA").save(str(output_path), "PNG")
+    vals = data.ravel()[flat_idx]          # (H, W) — wartości z natywnej siatki
+    vals[~valid] = np.nan                  # poza domeną radaru → przezroczyste
+    # NaN trzeba ZAMASKOWAĆ: to_rgba na surowej tablicy z BoundaryNorm renderuje
+    # NaN jako kolor (alpha=255), dopiero masked array uruchamia set_bad (alpha=0).
+    vals = np.ma.masked_invalid(vals)
+    rgba = plt.cm.ScalarMappable(norm=norm, cmap=cmap).to_rgba(vals, bytes=True)
+    Image.fromarray(rgba, "RGBA").save(str(output_path), "PNG")
 
 
 # ── Funkcje pomocnicze ───────────────────────────────────────────────────────
@@ -440,7 +476,50 @@ def compute_linda(R_obs: np.ndarray, V: np.ndarray, kmperpixel: float) -> np.nda
         return None
 
 
-def main(ensemble: bool = False, linda: bool = True) -> None:
+def compute_anvil(R_obs: np.ndarray, V: np.ndarray) -> np.ndarray | None:
+    """
+    Deterministyczna prognoza ANVIL (Autoregressive Nowcasting using VIL).
+
+    ANVIL dopasowuje model autoregresyjny AR(2) w przestrzennie zdekomponowanym
+    polu, dzięki czemu lepiej oddaje rozwój i zanik komórek niż czysta
+    ekstrapolacja. Działa na natężeniu opadu w jednostkach liniowych (mm/h, NIE
+    dB) — podobnie jak LINDA.
+
+    ``rainrate=None`` jest **istotne**: pole wejściowe karmimy wprost jako mm/h i
+    NIE włączamy konwersji R(VIL). Konwersja R=a·VIL+b ma zaszyty próg ``VIL > 10``
+    (kalibrowany pod jednostki VIL, kg/m²); podanie naszego mm/h jako „VIL"
+    zerowałoby cały opad ≤ 10 mm/h, zostawiając tylko duże obszary ulewy. Bez
+    konwersji wynik jest w jednostkach wejścia (mm/h), a ``apply_rainrate_mask``
+    zeruje jedynie piksele < 0.1 mm/h (jak próg opadu w S-PROG).
+
+    Wymaga co najmniej ``ar_order + 2`` = 4 pól wejściowych (model liczy pochodne
+    czasowe). Zwraca (N_LEADTIMES, ysize, xsize) mm/h, albo ``None`` gdy ANVIL się
+    nie powiedzie — wtedy produkt ``anvil`` jest pomijany.
+    """
+    R_lin = np.nan_to_num(R_obs, nan=0.0)
+    R_lin[R_lin < 0] = 0.0
+    log.info("Obliczanie ANVIL (deterministyczna, AR-2)...")
+    try:
+        anvil_fct = nowcasts.get_method("anvil")
+        R_anvil = anvil_fct(
+            R_lin[-4:, :, :],
+            V,
+            N_LEADTIMES,
+            rainrate=None,
+            n_cascade_levels=8,
+            ar_order=2,
+            ar_window_radius=25,
+            fft_method="numpy",
+            apply_rainrate_mask=True,
+            num_workers=os.cpu_count() or 1,
+        )
+        return np.maximum(np.nan_to_num(np.asarray(R_anvil, dtype=np.float64), nan=0.0), 0.0)
+    except Exception as e:
+        log.warning("ANVIL nie powiodła się (%s) — produkt 'anvil' pominięty.", e)
+        return None
+
+
+def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> None:
     """
     Uruchamia pipeline prognozy i renderuje overlaye Leaflet.
 
@@ -454,6 +533,9 @@ def main(ensemble: bool = False, linda: bool = True) -> None:
     linda:
         Gdy ``True`` (domyślnie) dodatkowo liczy deterministyczną prognozę LINDA
         (overlaye ``linda``). Gdy ``False`` pomija LINDA (szybciej).
+    anvil:
+        Gdy ``True`` dodatkowo liczy deterministyczną prognozę ANVIL
+        (overlaye ``anvil``). Domyślnie ``False``.
     """
     # 1-2. Lista + pobranie skanów DPSRI (z cache) ───────────────────────────
     client = ImgwClient()
@@ -506,6 +588,9 @@ def main(ensemble: bool = False, linda: bool = True) -> None:
 
     # 7b. LINDA – druga deterministyczna metoda (opcjonalnie) ─────────────────
     R_linda = compute_linda(R_obs, V, kmperpixel) if linda else None
+
+    # 7c. ANVIL – trzecia deterministyczna metoda (opcjonalnie) ───────────────
+    R_anvil = compute_anvil(R_obs, V) if anvil else None
 
     # 8. STEPS – ensemble stochastyczny (opcjonalnie: mean + prawdopodobieństwa)
     R_mean: np.ndarray | None = None
@@ -711,18 +796,22 @@ def main(ensemble: bool = False, linda: bool = True) -> None:
 
     last_ts = timestamps[-1]
 
-    # 14. Overlaye Leaflet — typy: det (S-PROG) + linda (LINDA) ────────────────
+    # 14. Overlaye Leaflet — typy: det (S-PROG) + linda (LINDA) + anvil (ANVIL) ─
     extra = []
     if R_linda is not None:
         extra.append(("linda", R_linda))
+    if R_anvil is not None:
+        extra.append(("anvil", R_anvil))
     generate_leaflet_overlays(frames, R_mean, R_det, P_all, info, last_ts,
                               extra_dets=extra)
 
-    # 15. Alerty Telegram o silnym opadzie (STEPS / LINDA) ─────────────────────
+    # 15. Alerty Telegram o silnym opadzie (STEPS / LINDA / ANVIL) ─────────────
     try:
         forecasts = {"STEPS": R_det}
         if R_linda is not None:
             forecasts["LINDA"] = R_linda
+        if R_anvil is not None:
+            forecasts["ANVIL"] = R_anvil
         notify_precip_alerts(forecasts, info, last_ts, timestep=TIMESTEP)
     except Exception as exc:
         log.warning("Powiadomienia Telegram pominięte: %s", exc)
@@ -759,13 +848,16 @@ def generate_leaflet_overlays(
     WWW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     X_3857, Y_3857, bounds = compute_epsg3857_mesh(info)
+    # Reprojekcję liczymy RAZ jako mapę indeksów — render każdej klatki to potem
+    # samo indeksowanie numpy (zob. build_warp_index / render_overlay_png).
+    warp_idx, warp_valid, _W, _H = build_warp_index(info, X_3857, Y_3857)
     with open(WWW_DATA_DIR / "bounds.json", "w") as fh:
         json.dump(bounds, fh)
 
     # Manifest: pełny indeks wygenerowanych plików (front i PHP czytają to zamiast
     # globować katalog → atomowe przełączenie nowych danych na serwerze).
     manifest: dict = {
-        "generated": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "bounds": bounds,
         "meta": meta,
         "obs": [],
@@ -820,11 +912,11 @@ def generate_leaflet_overlays(
             })
         manifest["fcst"][suffix] = entries
 
-    # Renderowanie równoległe – matplotlib Agg jest thread-safe gdy każdy wątek
-    # tworzy własny Figure (co render_overlay_png robi).
+    # Renderowanie równoległe – operacje numpy/PIL zwalniają GIL, więc wątki
+    # realnie przyspieszają (a nie ma już ciężkiego matplotlib pcolormesh).
     def _render(task):
         data, path, cmap, norm = task
-        render_overlay_png(data, X_3857, Y_3857, path, cmap, norm)
+        render_overlay_png(data, warp_idx, warp_valid, path, cmap, norm)
         return path.name
 
     n_render = min(os.cpu_count() or 4, len(render_tasks))
@@ -861,6 +953,9 @@ if __name__ == "__main__":
     grp.add_argument("--no-linda", dest="linda", action="store_false",
                      help="Pomiń LINDA (szybciej).")
     parser.set_defaults(linda=True)
+    parser.add_argument("--anvil", dest="anvil", action="store_true",
+                        help="Generuj też prognozę ANVIL (AR-2; domyślnie wyłączone).")
+    parser.set_defaults(anvil=False)
     args = parser.parse_args()
 
-    main(ensemble=args.ensemble, linda=args.linda)
+    main(ensemble=args.ensemble, linda=args.linda, anvil=args.anvil)

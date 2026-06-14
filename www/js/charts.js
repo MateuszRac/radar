@@ -9,8 +9,10 @@ let chartRain = null;
 const FCST_SERIES = [
   { key: 'det',       label: 'S-PROG',      color: '#e07020' },
   { key: 'linda',     label: 'LINDA',       color: '#27ae60' },
+  { key: 'anvil',     label: 'ANVIL',       color: '#2980d9' },
   { key: 'icon',      label: 'S-PROG+ICON', color: '#9b59b6' },
   { key: 'lindaicon', label: 'LINDA+ICON',  color: '#16a8a8' },
+  { key: 'anvilicon', label: 'ANVIL+ICON',  color: '#d96d2f' },
 ];
 
 const BASE = {

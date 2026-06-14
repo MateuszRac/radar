@@ -684,6 +684,7 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
             seed=SEED,
         )
         # R_f shape: (N_ENS_MEMBERS, N_LEADTIMES, ysize, xsize)
+        del R_dBR              # po STEPS już niepotrzebny — zwolnij przed dalszą pracą
         R_f = transformation.dB_transform(R_f, threshold=PRECIP_THR_DBR, inverse=True)[0]
         R_mean = np.nanmean(R_f, axis=0).astype(np.float32)   # (N_LEADTIMES, ysize, xsize)
 
@@ -863,7 +864,8 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
 
     # Zwolnij duże tablice pośrednie niepotrzebne do renderu — niższy szczyt
     # pamięci (istotne na RPi). Render używa tylko frames + gotowych prognoz.
-    del R_obs, R_dBR, V, metadata
+    # R_dBR zwolniono już wcześniej (po S-PROG / po ensemblu), więc go tu nie ma.
+    del R_obs, V, metadata
     gc.collect()
 
     # 14. Overlaye Leaflet — typy: det (S-PROG) + linda (LINDA) + anvil (ANVIL) ─

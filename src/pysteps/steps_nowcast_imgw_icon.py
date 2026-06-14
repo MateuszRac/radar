@@ -322,7 +322,7 @@ def blend_radar_nwp(radar: np.ndarray, icon_stack: np.ndarray) -> np.ndarray:
         wr = w_radar[:, None, None]
         wn = w_nwp[:, None, None]
 
-    return np.maximum(wr * radar + wn * icon_stack, 0.0)
+    return np.maximum(wr * radar + wn * icon_stack, 0.0).astype(np.float32)
 
 
 def build_forecast_meta(run_dt: datetime, last_ts: datetime,
@@ -389,9 +389,10 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
 
     # 3. dBR transform + pole ruchu ───────────────────────────────────────────
     R_dBR, _ = transformation.dB_transform(
-        R_obs.copy(), metadata.copy(), threshold=0.1, zerovalue=-15.0
+        R_obs.copy(), metadata.copy(),
+        threshold=base.PRECIP_THR_MM, zerovalue=base.ZEROVALUE_DBR
     )
-    R_dBR[~np.isfinite(R_dBR)] = -15.0
+    R_dBR[~np.isfinite(R_dBR)] = base.ZEROVALUE_DBR
 
     log.info("Estymacja pola ruchu (Lucas-Kanade)...")
     V = dense_lucaskanade(R_dBR)
@@ -406,8 +407,9 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
         log.info("Obliczanie S-PROG (deterministyczna)...")
         sprog_method = nowcasts.get_method("sprog")
         R_det = sprog_method(R_dBR[-3:, :, :], V, N_LEADTIMES,
-                             n_cascade_levels=6, precip_thr=-10.0)
-        R_det = np.maximum(transformation.dB_transform(R_det, threshold=-10.0, inverse=True)[0], 0.0)
+                             n_cascade_levels=6, precip_thr=base.PRECIP_THR_DBR)
+        R_det = np.maximum(transformation.dB_transform(R_det, threshold=base.PRECIP_THR_DBR, inverse=True)[0], 0.0)
+        R_det = R_det.astype(np.float32)   # float32 — o połowę mniej RAM
 
     # 4b. LINDA deterministyczna (opcjonalnie) ────────────────────────────────
     R_linda = base.compute_linda(R_obs, V, kmperpixel) if linda else None
@@ -451,15 +453,15 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
         steps_method = nowcasts.get_method("steps")
         R_f = steps_method(
             R_dBR[-3:, :, :], V, N_LEADTIMES, N_ENS_MEMBERS,
-            n_cascade_levels=4, precip_thr=-10.0, kmperpixel=kmperpixel,
+            n_cascade_levels=4, precip_thr=base.PRECIP_THR_DBR, kmperpixel=kmperpixel,
             timestep=TIMESTEP, noise_method="nonparametric",
             vel_pert_method="bps", mask_method="incremental",
             num_workers=n_workers, seed=SEED,
         )
-        R_f = np.maximum(transformation.dB_transform(R_f, threshold=-10.0, inverse=True)[0], 0.0)
+        R_f = np.maximum(transformation.dB_transform(R_f, threshold=base.PRECIP_THR_DBR, inverse=True)[0], 0.0)
 
         R_blended = blend_radar_nwp(R_f, icon_stack)   # (ens, lead, y, x)
-        R_mean = np.nanmean(R_blended, axis=0)
+        R_mean = np.nanmean(R_blended, axis=0).astype(np.float32)
 
         log.info("Obliczanie prawdopodobieństw przekroczenia progów...")
         P_all = np.stack([

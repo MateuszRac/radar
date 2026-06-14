@@ -66,6 +66,13 @@ N_LEADTIMES   = int(120/TIMESTEP)      # kroków prognozy: 12 × 5 min = 60 min
 N_ENS_MEMBERS = 50      # liczba członków ensemblu
 SEED          = 42
 
+# Próg natężenia opadu uznawanego za „opad" — zgodny z dolną granicą palety RATE
+# (0.01 mm/h). Poniżej tej wartości = sucho. Wcześniej 0.1 mm/h kasowało cały
+# lekki opad (znikał w prognozie, choć był w obserwacji). dBR: 10·log10(0.01)=-20.
+PRECIP_THR_MM  = 0.01     # próg w mm/h (transformacja wejściowa, prog odwrotny)
+PRECIP_THR_DBR = -20.0    # ten sam próg w dBR (precip_thr dla S-PROG/STEPS)
+ZEROVALUE_DBR  = -25.0    # wartość „sucho" w dBR (kilka dB poniżej progu)
+
 COMPO_PATH  = "/Oper/Polrad/Produkty/HVD/HVD_COMPO_DPSRI.comp.sri"
 WWW_DATA_DIR = Path("www/data")   # katalog dla overlayów Leaflet
 
@@ -471,7 +478,8 @@ def compute_linda(R_obs: np.ndarray, V: np.ndarray, kmperpixel: float) -> np.nda
             timestep=TIMESTEP,
             num_workers=os.cpu_count() or 1,
         )
-        return np.maximum(np.nan_to_num(np.asarray(R_linda, dtype=np.float64), nan=0.0), 0.0)
+        # float32 wystarcza dla natężenia opadu — o połowę mniej RAM (ważne na RPi).
+        return np.maximum(np.nan_to_num(np.asarray(R_linda, dtype=np.float32), nan=0.0), 0.0)
     except Exception as e:
         log.warning("LINDA nie powiodła się (%s) — produkt 'linda' pominięty.", e)
         return None
@@ -514,7 +522,8 @@ def compute_anvil(R_obs: np.ndarray, V: np.ndarray) -> np.ndarray | None:
             apply_rainrate_mask=True,
             num_workers=os.cpu_count() or 1,
         )
-        return np.maximum(np.nan_to_num(np.asarray(R_anvil, dtype=np.float64), nan=0.0), 0.0)
+        # float32 wystarcza dla natężenia opadu — o połowę mniej RAM (ważne na RPi).
+        return np.maximum(np.nan_to_num(np.asarray(R_anvil, dtype=np.float32), nan=0.0), 0.0)
     except Exception as e:
         log.warning("ANVIL nie powiodła się (%s) — produkt 'anvil' pominięty.", e)
         return None
@@ -569,9 +578,9 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
     # 5. Transformacja logarytmiczna dBR (wymagana przez STEPS) ──────────────
     R_dBR, meta_dBR = transformation.dB_transform(
         R_obs.copy(), metadata.copy(),
-        threshold=0.1, zerovalue=-15.0
+        threshold=PRECIP_THR_MM, zerovalue=ZEROVALUE_DBR
     )
-    R_dBR[~np.isfinite(R_dBR)] = -15.0
+    R_dBR[~np.isfinite(R_dBR)] = ZEROVALUE_DBR
 
     # 6. Pole ruchu – Lucas-Kanade ────────────────────────────────────────────
     log.info("Estymacja pola ruchu (Lucas-Kanade)...")
@@ -595,9 +604,10 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
             V,
             N_LEADTIMES,
             n_cascade_levels=10,
-            precip_thr=-10.0,
+            precip_thr=PRECIP_THR_DBR,
         )
-        R_det = transformation.dB_transform(R_det, threshold=-10.0, inverse=True)[0]
+        R_det = transformation.dB_transform(R_det, threshold=PRECIP_THR_DBR, inverse=True)[0]
+        R_det = R_det.astype(np.float32)   # float32 — o połowę mniej RAM
         # R_det shape: (N_LEADTIMES, ysize, xsize)
 
     # 7b. LINDA – druga deterministyczna metoda (opcjonalnie) ─────────────────
@@ -623,7 +633,7 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
             N_LEADTIMES,
             N_ENS_MEMBERS,
             n_cascade_levels=4,
-            precip_thr=-10.0,
+            precip_thr=PRECIP_THR_DBR,
             kmperpixel=kmperpixel,
             timestep=TIMESTEP,
             noise_method="nonparametric",
@@ -633,8 +643,8 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
             seed=SEED,
         )
         # R_f shape: (N_ENS_MEMBERS, N_LEADTIMES, ysize, xsize)
-        R_f = transformation.dB_transform(R_f, threshold=-10.0, inverse=True)[0]
-        R_mean = np.nanmean(R_f, axis=0)   # (N_LEADTIMES, ysize, xsize)
+        R_f = transformation.dB_transform(R_f, threshold=PRECIP_THR_DBR, inverse=True)[0]
+        R_mean = np.nanmean(R_f, axis=0).astype(np.float32)   # (N_LEADTIMES, ysize, xsize)
 
         log.info("Obliczanie prawdopodobieństw przekroczenia progów...")
         P_all = np.stack([

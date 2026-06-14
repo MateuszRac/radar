@@ -66,6 +66,12 @@ N_LEADTIMES   = int(120/TIMESTEP)      # kroków prognozy: 12 × 5 min = 60 min
 N_ENS_MEMBERS = 50      # liczba członków ensemblu
 SEED          = 42
 
+# Zgrubienie siatki na czas liczenia (block-mean). 1 = pełna rozdzielczość (~1 km).
+# Na słabym sprzęcie (Raspberry Pi) ustaw env STEPS_DOWNSCALE=2 → 4× mniej RAM i
+# ~4× szybsze S-PROG / ANVIL / LINDA (overlaye wychodzą w ~2 km). Dotyczy CAŁEGO
+# pipeline'u (obs + prognoza), więc wszystko pozostaje spójne geometrycznie.
+DOWNSCALE = max(int(os.getenv("STEPS_DOWNSCALE", "1")), 1)
+
 # Próg natężenia opadu uznawanego za „opad" — zgodny z dolną granicą palety RATE
 # (0.01 mm/h). Poniżej tej wartości = sucho. Wcześniej 0.1 mm/h kasowało cały
 # lekki opad (znikał w prognozie, choć był w obserwacji). dBR: 10·log10(0.01)=-20.
@@ -288,7 +294,7 @@ def read_compo_h5(filepath: str) -> dict:
         ts = datetime.strptime(f"{startdate}{starttime}", "%Y%m%d%H%M%S")
 
     return {
-        "data": data.astype(np.float64),
+        "data": data.astype(np.float32),   # float32 — o połowę mniej RAM (RPi)
         "projdef": projdef,
         "xsize": xsize, "ysize": ysize,
         "x1": x1, "y1": y1, "x2": x2, "y2": y2,
@@ -314,6 +320,33 @@ def build_pysteps_metadata(info: dict, timestamps: list[datetime]) -> dict:
         "timestamps":  timestamps,
         "shape":       (info["ysize"], info["xsize"]),
     }
+
+
+def downscale_frames(frames: list[dict], factor: int) -> None:
+    """
+    Zgrubia in-place siatkę wszystkich klatek o ``factor`` (block-mean) i
+    aktualizuje geometrię (xsize/ysize, x2/y2). Cały dalszy pipeline (motion,
+    S-PROG, ANVIL, LINDA, warp, render) działa już na mniejszej siatce → przy
+    ``factor=2`` to ~4× mniej pamięci i ~4× szybsze metody prognozy.
+
+    ``factor=1`` → bez zmian. Przy niepodzielnym wymiarze nadmiarowe wiersze/
+    kolumny z brzegu są przycinane (zaniedbywalna utrata zasięgu).
+    """
+    if factor <= 1:
+        return
+    ys, xs = frames[0]["ysize"], frames[0]["xsize"]
+    ys2, xs2 = (ys // factor) * factor, (xs // factor) * factor
+    px = (frames[0]["x2"] - frames[0]["x1"]) / xs
+    py = (frames[0]["y2"] - frames[0]["y1"]) / ys
+    nyy, nxx = ys2 // factor, xs2 // factor
+    for f in frames:
+        d = f["data"][:ys2, :xs2]
+        f["data"] = d.reshape(nyy, factor, nxx, factor).mean(axis=(1, 3)).astype(np.float32)
+        f["xsize"], f["ysize"] = nxx, nyy
+        f["x2"] = f["x1"] + xs2 * px
+        f["y2"] = f["y1"] + ys2 * py
+    log.info("Zgrubienie siatki ×%d: %d×%d → %d×%d px (~%.1f km/px)",
+             factor, xs, ys, nxx, nyy, px * factor / 1000.0)
 
 
 def load_voivodeships(native_crs_proj4: str) -> gpd.GeoDataFrame | None:
@@ -565,13 +598,15 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
     # 3. Wczytaj HDF5 → macierze mm/h ────────────────────────────────────────
     log.info("Dekodowanie plików HDF5...")
     frames = [read_compo_h5(path) for _, path in records]
+    downscale_frames(frames, DOWNSCALE)   # zgrubienie siatki (RPi) — patrz DOWNSCALE
     info       = frames[0]          # geometria siatki (wspólna dla wszystkich)
     timestamps = [f["timestamp"] for f in frames]
 
     # 4. Budowanie macierzy 3D – dane już w mm/h, ujemne wartości → NaN ──────
-    R_obs = np.stack([f["data"] for f in frames], axis=0).astype(np.float64)
+    R_obs = np.stack([f["data"] for f in frames], axis=0).astype(np.float32)
     R_obs[R_obs < 0] = np.nan
-    # shape: (N_FRAMES, ysize, xsize)
+    # shape: (N_FRAMES, ysize, xsize); float32 → o połowę mniej RAM, a pysteps
+    # liczy wtedy kaskady/FFT też w pojedynczej precyzji (mniejszy szczyt na RPi).
 
     metadata = build_pysteps_metadata(info, timestamps)
 
@@ -603,12 +638,18 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
             R_dBR[-3:, :, :],
             V,
             N_LEADTIMES,
-            n_cascade_levels=10,
+            n_cascade_levels=6,        # 6 zamiast 10 — szybciej i mniej RAM, bez istotnej utraty jakości
             precip_thr=PRECIP_THR_DBR,
         )
         R_det = transformation.dB_transform(R_det, threshold=PRECIP_THR_DBR, inverse=True)[0]
         R_det = R_det.astype(np.float32)   # float32 — o połowę mniej RAM
         # R_det shape: (N_LEADTIMES, ysize, xsize)
+
+    # R_dBR jest już niepotrzebny dla LINDA/ANVIL (liczą na mm/h) — zwolnij go,
+    # gdy nie liczymy ensemblu (ten potrzebuje R_dBR w kroku 8).
+    if not ensemble:
+        del R_dBR
+        gc.collect()
 
     # 7b. LINDA – druga deterministyczna metoda (opcjonalnie) ─────────────────
     R_linda = compute_linda(R_obs, V, kmperpixel) if linda else None

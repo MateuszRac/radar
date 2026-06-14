@@ -380,10 +380,11 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
     # 2. Dekodowanie HDF5 (reużyte z bazowego skryptu) ────────────────────────
     log.info("Dekodowanie plików HDF5...")
     frames     = [base.read_compo_h5(p) for _, p in records]
+    base.downscale_frames(frames, base.DOWNSCALE)   # zgrubienie siatki (RPi)
     info       = frames[0]
     timestamps = [f["timestamp"] for f in frames]
 
-    R_obs = np.stack([f["data"] for f in frames]).astype(np.float64)
+    R_obs = np.stack([f["data"] for f in frames]).astype(np.float32)
     R_obs[R_obs < 0] = np.nan
     metadata = base.build_pysteps_metadata(info, timestamps)
 

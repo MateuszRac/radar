@@ -14,6 +14,7 @@ Wymagane pakiety (poza standardowymi zależnościami projektu):
     pysteps, geopandas, cartopy (opcjonalnie, do granic województw)
 """
 
+import gc
 import json
 import logging
 import os
@@ -506,7 +507,7 @@ def compute_anvil(R_obs: np.ndarray, V: np.ndarray) -> np.ndarray | None:
             V,
             N_LEADTIMES,
             rainrate=None,
-            n_cascade_levels=8,
+            n_cascade_levels=4,
             ar_order=2,
             ar_window_radius=25,
             fft_method="numpy",
@@ -809,6 +810,11 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
 
     last_ts = timestamps[-1]
 
+    # Zwolnij duże tablice pośrednie niepotrzebne do renderu — niższy szczyt
+    # pamięci (istotne na RPi). Render używa tylko frames + gotowych prognoz.
+    del R_obs, R_dBR, V, metadata
+    gc.collect()
+
     # 14. Overlaye Leaflet — typy: det (S-PROG) + linda (LINDA) + anvil (ANVIL) ─
     extra = []
     if R_linda is not None:
@@ -879,18 +885,19 @@ def generate_leaflet_overlays(
         "fcst": {},
     }
 
-    # Buduj listę zadań renderowania (data jest już skopiowana – bezpieczne dla wątków)
+    # Buduj listę zadań renderowania. Trzymamy TYLKO referencje do już istniejących
+    # tablic (+ indeks klatki) — maskę liczymy leniwie w wątku renderu. Wcześniejsze
+    # materializowanie ~80 kopii 800×800 naraz zjadało setki MB i ubijało RPi (OOM).
     base_dt  = last_ts.replace(second=0, microsecond=0)
     base_str = base_dt.strftime("%Y%m%d_%H%M")
-    render_tasks: list[tuple[np.ndarray, Path, object, object]] = []
+    # Task = (źródło, idx|None, ścieżka, cmap, norm); idx=None → źródło jest 2D (obs).
+    render_tasks: list[tuple[np.ndarray, int | None, Path, object, object]] = []
 
     for frame in frames:
         ts = frame["timestamp"].replace(second=0, microsecond=0)
         ts_str = ts.strftime("%Y%m%d_%H%M")
         name = f"obs_{ts_str}.png"
-        data = np.where(np.isfinite(frame["data"]) & (frame["data"] > 0),
-                        frame["data"], np.nan)
-        render_tasks.append((data, WWW_DATA_DIR / name, RATE_CMAP, RATE_NORM))
+        render_tasks.append((frame["data"], None, WWW_DATA_DIR / name, RATE_CMAP, RATE_NORM))
         manifest["obs"].append({
             "file":  name,
             "time":  ts.strftime("%Y-%m-%dT%H:%M:00Z"),
@@ -915,9 +922,7 @@ def generate_leaflet_overlays(
         for i in range(N_LEADTIMES):
             lead_min = (i + 1) * TIMESTEP
             name = f"fcst_{base_str}_plus_{lead_min:03d}_{suffix}.png"
-            data = np.where(np.isfinite(stack[i]) & (stack[i] > 0),
-                            stack[i], np.nan)
-            render_tasks.append((data, WWW_DATA_DIR / name, cmap, norm))
+            render_tasks.append((stack, i, WWW_DATA_DIR / name, cmap, norm))
             valid = base_dt + timedelta(minutes=lead_min)
             entries.append({
                 "file":     name,
@@ -929,12 +934,21 @@ def generate_leaflet_overlays(
 
     # Renderowanie równoległe – operacje numpy/PIL zwalniają GIL, więc wątki
     # realnie przyspieszają (a nie ma już ciężkiego matplotlib pcolormesh).
+    # Maskę liczymy tu (leniwie), żeby nie trzymać wszystkich kopii naraz.
     def _render(task):
-        data, path, cmap, norm = task
+        arr, idx, path, cmap, norm = task
+        src = arr if idx is None else arr[idx]
+        data = np.where(np.isfinite(src) & (src > 0), src, np.nan)
         render_overlay_png(data, warp_idx, warp_valid, path, cmap, norm)
         return path.name
 
-    n_render = min(os.cpu_count() or 4, len(render_tasks))
+    # Liczbę wątków renderu można ograniczyć przez STEPS_RENDER_WORKERS — na RPi
+    # mniej wątków = niższy szczyt pamięci (każdy alokuje przejściowy bufor RGBA).
+    _env_workers = os.getenv("STEPS_RENDER_WORKERS")
+    if _env_workers and _env_workers.isdigit() and int(_env_workers) > 0:
+        n_render = min(int(_env_workers), len(render_tasks))
+    else:
+        n_render = min(os.cpu_count() or 4, 4, len(render_tasks))
     log.info("Renderowanie %d PNG równolegle (%d wątki)...",
              len(render_tasks), n_render)
 

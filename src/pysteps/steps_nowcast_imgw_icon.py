@@ -471,6 +471,12 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
 
     log.info("Prognoza gotowa. Przygotowywanie overlayów...")
 
+    # Zwolnij duże tablice pośrednie niepotrzebne do renderu (niższy szczyt
+    # pamięci — istotne na RPi; blendy są już policzone).
+    import gc
+    del R_obs, R_dBR, V, metadata, icon_stack
+    gc.collect()
+
     # 8. Overlaye Leaflet (reużyte) — typy: det, linda, anvil, icon, lindaicon, anvilicon
     last_ts = timestamps[-1]
     extra = []

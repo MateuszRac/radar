@@ -519,16 +519,16 @@ def compute_anvil(R_obs: np.ndarray, V: np.ndarray) -> np.ndarray | None:
         return None
 
 
-def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> None:
+def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
+         sprog: bool = True) -> None:
     """
     Uruchamia pipeline prognozy i renderuje overlaye Leaflet.
 
     Parametry
     ---------
     ensemble:
-        Gdy ``False`` (domyślnie) liczy tylko deterministyczną prognozę S-PROG
-        (overlaye ``det``) — najszybsza ścieżka. Gdy ``True`` dodatkowo uruchamia
-        stochastyczny ensemble STEPS i generuje overlaye ``mean`` oraz
+        Gdy ``False`` (domyślnie) nie liczy stochastycznego ensemblu STEPS. Gdy
+        ``True`` uruchamia ensemble STEPS i generuje overlaye ``mean`` oraz
         prawdopodobieństwa ``prob01`` / ``prob10`` (wolniej).
     linda:
         Gdy ``True`` (domyślnie) dodatkowo liczy deterministyczną prognozę LINDA
@@ -536,7 +536,18 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
     anvil:
         Gdy ``True`` dodatkowo liczy deterministyczną prognozę ANVIL
         (overlaye ``anvil``). Domyślnie ``False``.
+    sprog:
+        Gdy ``True`` (domyślnie) liczy deterministyczną prognozę S-PROG
+        (overlaye ``det``). Gdy ``False`` pomija S-PROG — pozwala np. wygenerować
+        wyłącznie ANVIL (``--no-sprog --anvil``).
+
+    Musi pozostać włączona co najmniej jedna metoda (S-PROG / LINDA / ANVIL /
+    ensemble), inaczej nie powstałby żaden produkt.
     """
+    if not (sprog or linda or anvil or ensemble):
+        log.error("Wyłączono wszystkie metody — włącz co najmniej jedną "
+                  "(S-PROG / LINDA / ANVIL / ensemble).")
+        sys.exit(1)
     # 1-2. Lista + pobranie skanów DPSRI (z cache) ───────────────────────────
     client = ImgwClient()
     records = fetch_radar_scans(client)
@@ -571,20 +582,22 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
         kmperpixel, info["xsize"], info["ysize"],
     )
 
-    # 7. S-PROG – prognoza deterministyczna (zawsze) ──────────────────────────
+    # 7. S-PROG – prognoza deterministyczna (opcjonalna) ──────────────────────
     # Ekstrapolacja po polu ruchu V z progresywnym wygładzaniem nieprzewidywalnych
     # małych skal — "najlepsza pojedyncza prognoza", bez szumu stochastycznego.
-    log.info("Obliczanie S-PROG (deterministyczna)...")
-    sprog_method = nowcasts.get_method("sprog")
-    R_det = sprog_method(
-        R_dBR[-3:, :, :],
-        V,
-        N_LEADTIMES,
-        n_cascade_levels=10,
-        precip_thr=-10.0,
-    )
-    R_det = transformation.dB_transform(R_det, threshold=-10.0, inverse=True)[0]
-    # R_det shape: (N_LEADTIMES, ysize, xsize)
+    R_det: np.ndarray | None = None
+    if sprog:
+        log.info("Obliczanie S-PROG (deterministyczna)...")
+        sprog_method = nowcasts.get_method("sprog")
+        R_det = sprog_method(
+            R_dBR[-3:, :, :],
+            V,
+            N_LEADTIMES,
+            n_cascade_levels=10,
+            precip_thr=-10.0,
+        )
+        R_det = transformation.dB_transform(R_det, threshold=-10.0, inverse=True)[0]
+        # R_det shape: (N_LEADTIMES, ysize, xsize)
 
     # 7b. LINDA – druga deterministyczna metoda (opcjonalnie) ─────────────────
     R_linda = compute_linda(R_obs, V, kmperpixel) if linda else None
@@ -807,7 +820,9 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
 
     # 15. Alerty Telegram o silnym opadzie (STEPS / LINDA / ANVIL) ─────────────
     try:
-        forecasts = {"STEPS": R_det}
+        forecasts = {}
+        if R_det is not None:
+            forecasts["STEPS"] = R_det
         if R_linda is not None:
             forecasts["LINDA"] = R_linda
         if R_anvil is not None:
@@ -820,7 +835,7 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
 def generate_leaflet_overlays(
     frames: list[dict],
     R_mean: np.ndarray | None,
-    R_det: np.ndarray,
+    R_det: np.ndarray | None,
     P_all: np.ndarray | None,
     info: dict,
     last_ts: datetime,
@@ -882,9 +897,9 @@ def generate_leaflet_overlays(
             "label": ts.strftime("%H:%M UTC"),
         })
 
-    overlay_specs = [
-        ("det",    R_det,     RATE_CMAP,   RATE_NORM),
-    ]
+    overlay_specs = []
+    if R_det is not None:
+        overlay_specs.append(("det", R_det, RATE_CMAP, RATE_NORM))
     if R_mean is not None:
         overlay_specs.append(("mean", R_mean, RATE_CMAP, RATE_NORM))
     if P_all is not None:
@@ -956,6 +971,9 @@ if __name__ == "__main__":
     parser.add_argument("--anvil", dest="anvil", action="store_true",
                         help="Generuj też prognozę ANVIL (AR-2; domyślnie wyłączone).")
     parser.set_defaults(anvil=False)
+    parser.add_argument("--no-sprog", dest="sprog", action="store_false",
+                        help="Pomiń S-PROG (produkt 'det') — np. tylko ANVIL: --no-sprog --anvil.")
+    parser.set_defaults(sprog=True)
     args = parser.parse_args()
 
-    main(ensemble=args.ensemble, linda=args.linda, anvil=args.anvil)
+    main(ensemble=args.ensemble, linda=args.linda, anvil=args.anvil, sprog=args.sprog)

@@ -326,24 +326,28 @@ def blend_radar_nwp(radar: np.ndarray, icon_stack: np.ndarray) -> np.ndarray:
 
 
 def build_forecast_meta(run_dt: datetime, last_ts: datetime,
-                        with_linda: bool = True, with_anvil: bool = False) -> dict:
+                        with_linda: bool = True, with_anvil: bool = False,
+                        with_sprog: bool = True) -> dict:
     """
     Buduje słownik meta dla manifestu — lista dostępnych typów prognozy
     (S-PROG / LINDA / ANVIL, każdy także w wariancie z ICON-EU) + czas runu ICON-EU.
     """
-    types = [{"key": "det", "label": "S-PROG", "short": "S-PROG"}]
+    types = []
+    if with_sprog:
+        types.append({"key": "det", "label": "S-PROG", "short": "S-PROG"})
     if with_linda:
         types.append({"key": "linda", "label": "LINDA", "short": "LINDA"})
     if with_anvil:
         types.append({"key": "anvil", "label": "ANVIL", "short": "ANVIL"})
-    types.append({"key": "icon", "label": "S-PROG + ICON-EU", "short": "S-PROG+ICON"})
+    if with_sprog:
+        types.append({"key": "icon", "label": "S-PROG + ICON-EU", "short": "S-PROG+ICON"})
     if with_linda:
         types.append({"key": "lindaicon", "label": "LINDA + ICON-EU", "short": "LINDA+ICON"})
     if with_anvil:
         types.append({"key": "anvilicon", "label": "ANVIL + ICON-EU", "short": "ANVIL+ICON"})
     return {
         "types":      types,
-        "default":    "det",
+        "default":    types[0]["key"] if types else "det",
         "radar_scan": last_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "icon_run":   run_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -351,13 +355,22 @@ def build_forecast_meta(run_dt: datetime, last_ts: datetime,
 
 # ── Główna logika ─────────────────────────────────────────────────────────────
 
-def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> None:
+def main(ensemble: bool = False, linda: bool = True, anvil: bool = False,
+         sprog: bool = True) -> None:
     """
     Pipeline S-PROG (+ opcjonalnie LINDA / ANVIL / ensemble STEPS) zmiksowany z ICON-EU.
     Gdy ``linda=True`` (domyślnie) generuje też typy ``linda`` i ``lindaicon``.
     Gdy ``anvil=True`` generuje też typy ``anvil`` i ``anvilicon``.
+    Gdy ``sprog=False`` pomija S-PROG — typy ``det`` i ``icon`` nie powstają.
     Wyjście identyczne jak w skrypcie bazowym + plik meta.json (typ „+ICON”).
+
+    Musi pozostać włączona co najmniej jedna metoda deterministyczna
+    (S-PROG / LINDA / ANVIL), bo ICON jest tylko blendem prognozy radarowej.
     """
+    if not (sprog or linda or anvil):
+        log.error("Wyłączono wszystkie metody deterministyczne — włącz S-PROG, "
+                  "LINDA lub ANVIL (ICON to tylko blend prognozy radarowej).")
+        sys.exit(1)
     client = ImgwClient()
     nwp    = NWP()
 
@@ -387,12 +400,14 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
     log.info("Rozdzielczość siatki: %.2f km/px  |  %d × %d px",
              kmperpixel, info["xsize"], info["ysize"])
 
-    # 4. S-PROG deterministyczna (zawsze) ─────────────────────────────────────
-    log.info("Obliczanie S-PROG (deterministyczna)...")
-    sprog = nowcasts.get_method("sprog")
-    R_det = sprog(R_dBR[-3:, :, :], V, N_LEADTIMES,
-                  n_cascade_levels=6, precip_thr=-10.0)
-    R_det = np.maximum(transformation.dB_transform(R_det, threshold=-10.0, inverse=True)[0], 0.0)
+    # 4. S-PROG deterministyczna (opcjonalna) ─────────────────────────────────
+    R_det: np.ndarray | None = None
+    if sprog:
+        log.info("Obliczanie S-PROG (deterministyczna)...")
+        sprog_method = nowcasts.get_method("sprog")
+        R_det = sprog_method(R_dBR[-3:, :, :], V, N_LEADTIMES,
+                             n_cascade_levels=6, precip_thr=-10.0)
+        R_det = np.maximum(transformation.dB_transform(R_det, threshold=-10.0, inverse=True)[0], 0.0)
 
     # 4b. LINDA deterministyczna (opcjonalnie) ────────────────────────────────
     R_linda = base.compute_linda(R_obs, V, kmperpixel) if linda else None
@@ -410,16 +425,20 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
     # 6. Blendy deterministyczne — warianty z ICON ───────────────────────────
     # det → produkt `det` (S-PROG), linda → `linda` (LINDA), a ich blendy z ICON
     # to `icon` (S-PROG+ICON) oraz `lindaicon` (LINDA+ICON).
-    R_det_blend   = blend_radar_nwp(R_det, icon_stack)
+    R_det_blend   = blend_radar_nwp(R_det, icon_stack) if R_det is not None else None
     R_linda_blend = blend_radar_nwp(R_linda, icon_stack) if R_linda is not None else None
     R_anvil_blend = blend_radar_nwp(R_anvil, icon_stack) if R_anvil is not None else None
 
     # Diagnostyka ostatniego kroku (lead = HORIZON_MIN, waga NWP = 100%):
     # icon_stack[-1] to czysto ICON. Jeśli ≈ 0, opad w ostatniej klatce zniknie.
-    log.info("Ostatni krok (+%d min): max S-PROG(det)=%.2f | max ICON=%.2f | "
-             "max blend(icon)=%.2f mm/h",
-             HORIZON_MIN, float(R_det[-1].max()),
-             float(icon_stack[-1].max()), float(R_det_blend[-1].max()))
+    if R_det is not None:
+        log.info("Ostatni krok (+%d min): max S-PROG(det)=%.2f | max ICON=%.2f | "
+                 "max blend(icon)=%.2f mm/h",
+                 HORIZON_MIN, float(R_det[-1].max()),
+                 float(icon_stack[-1].max()), float(R_det_blend[-1].max()))
+    else:
+        log.info("Ostatni krok (+%d min): max ICON=%.2f mm/h (S-PROG pominięty)",
+                 HORIZON_MIN, float(icon_stack[-1].max()))
 
     # 7. Ensemble STEPS (opcjonalnie) → blend → mean + prawdopodobieństwa ──────
     R_mean: np.ndarray | None = None
@@ -459,7 +478,8 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
         extra.append(("linda", R_linda))
     if R_anvil is not None:
         extra.append(("anvil", R_anvil))
-    extra.append(("icon", R_det_blend))
+    if R_det_blend is not None:
+        extra.append(("icon", R_det_blend))
     if R_linda_blend is not None:
         extra.append(("lindaicon", R_linda_blend))
     if R_anvil_blend is not None:
@@ -470,13 +490,16 @@ def main(ensemble: bool = False, linda: bool = True, anvil: bool = False) -> Non
         extra_dets=extra,
         meta=build_forecast_meta(run_dt, last_ts,
                                  with_linda=R_linda is not None,
-                                 with_anvil=R_anvil is not None),
+                                 with_anvil=R_anvil is not None,
+                                 with_sprog=R_det is not None),
     )
 
     # Alerty Telegram o silnym opadzie — sprawdzamy czyste prognozy radarowe
     # (STEPS / LINDA / ANVIL), bez wariantów ICON (te tłumią opad na krótkich horyzontach).
     try:
-        forecasts = {"STEPS": R_det}
+        forecasts = {}
+        if R_det is not None:
+            forecasts["STEPS"] = R_det
         if R_linda is not None:
             forecasts["LINDA"] = R_linda
         if R_anvil is not None:
@@ -506,6 +529,9 @@ if __name__ == "__main__":
     parser.add_argument("--anvil", dest="anvil", action="store_true",
                         help="Generuj też ANVIL i ANVIL+ICON (domyślnie wyłączone).")
     parser.set_defaults(anvil=False)
+    parser.add_argument("--no-sprog", dest="sprog", action="store_false",
+                        help="Pomiń S-PROG — typy 'det' i 'icon' nie powstają.")
+    parser.set_defaults(sprog=True)
     args = parser.parse_args()
 
-    main(ensemble=args.ensemble, linda=args.linda, anvil=args.anvil)
+    main(ensemble=args.ensemble, linda=args.linda, anvil=args.anvil, sprog=args.sprog)

@@ -1,19 +1,29 @@
 // ── Meteogram danych punktowych (panel boczny) ────────────────────────────────
-// Natężenie opadu [mm/h]: obserwacje (słupki) + linia dla każdego dostępnego
-// typu prognozy (S-PROG, LINDA, oraz warianty z ICON). Serie bez danych są ukryte.
+// Natężenie opadu [mm/h]: obserwacje (niebieskie słupki) + prognoza (pomarańczowe
+// słupki). Pokazujemy jedną serię prognozy (domyślnie ANVIL); jeśli aktywny typ
+// nie ma danych w punkcie, bierzemy pierwszy dostępny.
 // Wymaga globalnego Chart.js (ładowanego w index.php).
 
 let chartRain = null;
 
-// Kolejność i kolory serii prognostycznych (klucze = produkty z ?api=1 / point_data).
-const FCST_SERIES = [
-  { key: 'det',       label: 'S-PROG',      color: '#e07020' },
-  { key: 'linda',     label: 'LINDA',       color: '#27ae60' },
-  { key: 'anvil',     label: 'ANVIL',       color: '#2980d9' },
-  { key: 'icon',      label: 'S-PROG+ICON', color: '#9b59b6' },
-  { key: 'lindaicon', label: 'LINDA+ICON',  color: '#16a8a8' },
-  { key: 'anvilicon', label: 'ANVIL+ICON',  color: '#d96d2f' },
-];
+const OBS_COLOR  = 'rgba(29,111,224,.85)';   // niebieski  — obserwacje
+const FCST_COLOR = 'rgba(224,112,32,.92)';   // pomarańczowy — prognoza
+
+// Kolejność prób przy wyborze serii prognozy (gdy aktywny produkt nie ma danych).
+const FCST_KEYS = ['anvil', 'det', 'linda', 'icon', 'lindaicon', 'anvilicon'];
+
+const _p2 = n => String(n).padStart(2, '0');
+
+function fmtTimeUTC(iso) {
+  const d = new Date(iso);
+  return `${_p2(d.getUTCHours())}:${_p2(d.getUTCMinutes())}`;
+}
+
+function fmtFullUTC(iso) {
+  const d = new Date(iso);
+  return `${d.getUTCFullYear()}-${_p2(d.getUTCMonth() + 1)}-${_p2(d.getUTCDate())} `
+       + `${_p2(d.getUTCHours())}:${_p2(d.getUTCMinutes())} UTC`;
+}
 
 const BASE = {
   responsive: true,
@@ -22,9 +32,19 @@ const BASE = {
   plugins: {
     legend: { display: true, position: 'top',
       labels: { color: '#90aad0', font: { size: 9 }, boxWidth: 10, boxHeight: 10, padding: 6 } },
+    tooltip: {
+      callbacks: {
+        // Tytuł tooltipa = pełna data i godzina (UTC) danego słupka.
+        title: (items) => {
+          const t = chartRain?._fullTimes?.[items[0].dataIndex];
+          return t ? fmtFullUTC(t) : items[0].label;
+        },
+      },
+    },
   },
   scales: {
-    x: { grid: { color: 'rgba(45,68,112,.4)' }, ticks: { color: '#90aad0', maxRotation: 45, font: { size: 9 } } },
+    x: { grid: { color: 'rgba(45,68,112,.4)' },
+         ticks: { color: '#90aad0', maxRotation: 0, autoSkip: true, font: { size: 9 } } },
     y: { grid: { color: 'rgba(45,68,112,.4)' }, ticks: { color: '#90aad0', font: { size: 9 } },
          beginAtZero: true, title: { display: true, text: 'mm/h', color: '#6b7f9c', font: { size: 9 } } },
   },
@@ -35,13 +55,8 @@ export function initCharts() {
   Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
 
   const datasets = [
-    { type: 'bar', label: 'Obserwacje', backgroundColor: 'rgba(29,111,224,.85)', data: [] },
-    ...FCST_SERIES.map(s => ({
-      type: 'line', label: s.label,
-      borderColor: s.color, backgroundColor: s.color,
-      data: [], fill: false, tension: 0.25, borderWidth: 2,
-      pointRadius: 2, spanGaps: false, hidden: true,
-    })),
+    { type: 'bar', label: 'Obserwacje', backgroundColor: OBS_COLOR,  data: [] },
+    { type: 'bar', label: 'Prognoza',   backgroundColor: FCST_COLOR, data: [] },
   ];
 
   chartRain = new Chart(document.getElementById('chart-rain'), {
@@ -51,20 +66,26 @@ export function initCharts() {
   });
 }
 
-export function updateCharts(data) {
-  const obsLabels  = data.obs.map(o => o.label);
+export function updateCharts(data, product = 'anvil') {
+  // Wybór serii prognozy: aktywny produkt jeśli ma wartości, inaczej pierwszy dostępny.
+  let pkey = product;
+  if (!data.fcst.some(f => f[pkey] != null)) {
+    pkey = FCST_KEYS.find(k => data.fcst.some(f => f[k] != null)) || product;
+  }
+
+  const obsLabels  = data.obs.map(o => o.label);                       // "14:25"
   const obsValues  = data.obs.map(o => o.value);
-  const fcstLabels = data.fcst.map(f => f.label);
-  const padFront = arr => [...Array(obsLabels.length).fill(null), ...arr];
+  // Etykieta prognozy: dwie linie — lead ("+15 min") oraz godzina ważności.
+  const fcstLabels = data.fcst.map(f => [`+${f.lead_min} min`, fmtTimeUTC(f.time)]);
+  const fcstValues = data.fcst.map(f => f[pkey] ?? null);
 
+  const n = obsLabels.length;
   chartRain.data.labels = [...obsLabels, ...fcstLabels];
-  chartRain.data.datasets[0].data = [...obsValues, ...Array(fcstLabels.length).fill(null)];
+  chartRain.data.datasets[0].data = [...obsValues, ...Array(fcstValues.length).fill(null)];
+  chartRain.data.datasets[1].data = [...Array(n).fill(null), ...fcstValues];
 
-  FCST_SERIES.forEach((s, i) => {
-    const vals = data.fcst.map(f => f[s.key] ?? null);
-    chartRain.data.datasets[i + 1].data = padFront(vals);
-    chartRain.setDatasetVisibility(i + 1, vals.some(v => v !== null));
-  });
+  // Pełne czasy (UTC) dla tooltipów — wyrównane do etykiet.
+  chartRain._fullTimes = [...data.obs.map(o => o.time), ...data.fcst.map(f => f.time)];
 
   chartRain.update();
 }

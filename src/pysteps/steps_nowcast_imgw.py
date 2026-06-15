@@ -62,7 +62,9 @@ log = logging.getLogger(__name__)
 # ── Parametry prognozy ───────────────────────────────────────────────────────
 TIMESTEP      = 5       # krok czasowy [min]
 N_FRAMES      = int(60/TIMESTEP)       # liczba skanów wejściowych (min. 3 do STEPS)
-N_LEADTIMES   = int(120/TIMESTEP)      # kroków prognozy: 12 × 5 min = 60 min
+# Liczba kroków prognozy (każdy = TIMESTEP min). Konfigurowalna przez .env:
+# STEPS_LEADTIMES=24 → 120 min (domyślnie), =12 → 60 min (godzina).
+N_LEADTIMES   = max(int(os.getenv("STEPS_LEADTIMES", "24")), 1)
 N_ENS_MEMBERS = 50      # liczba członków ensemblu
 SEED          = 42
 

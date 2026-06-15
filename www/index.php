@@ -84,7 +84,7 @@ if (isset($_GET['api'])) {
     exit;
 }
 
-$v = '9';   // cache-busting statycznych zasobów
+$v = '10';   // cache-busting statycznych zasobów
 ?>
 <!DOCTYPE html>
 <html lang="pl">
@@ -153,7 +153,7 @@ $v = '9';   // cache-busting statycznych zasobów
     <div class="sp-hint" id="sp-point-hint" style="display:none"></div>
     <div id="sp-charts" style="display:none">
       <div class="chart-block">
-        <h5>Natężenie opadu [mm/h] — obserwacje + prognoza S-PROG</h5>
+        <h5>Natężenie opadu [mm/h] — obserwacje + prognoza</h5>
         <div class="chart-wrap h-rain"><canvas id="chart-rain"></canvas></div>
       </div>
     </div>

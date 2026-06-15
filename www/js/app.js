@@ -253,7 +253,7 @@ async function onMapClick(e) {
     $('sp-coords').innerHTML = `📍 <strong>${data.lat.toFixed(4)}°N, ${data.lng.toFixed(4)}°E</strong>`;
     $('sp-loading').style.display = 'none';
     $('sp-charts').style.display = 'block';
-    updateCharts(data);
+    updateCharts(data, activeProduct);
   } catch (err) {
     console.error(err);
     $('sp-loading').style.display = 'none';
